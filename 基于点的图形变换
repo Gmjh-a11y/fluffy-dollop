@@ -1,0 +1,133 @@
+import cv2
+import numpy as np
+import gradio as gr
+
+points_src = []
+points_dst = []
+image = None
+
+
+def upload_image(img):
+    global image, points_src, points_dst
+    points_src.clear()
+    points_dst.clear()
+    image = img
+    return img
+
+
+def record_points(evt: gr.SelectData):
+    global points_src, points_dst, image
+    x, y = evt.index[0], evt.index[1]
+
+
+    if len(points_src) == len(points_dst):
+        points_src.append([x, y])
+    else:
+        points_dst.append([x, y])
+
+
+    marked_image = image.copy()
+    for pt in points_src:
+        cv2.circle(marked_image, tuple(pt), 3, (255, 0, 0), -1)
+    for pt in points_dst:
+        cv2.circle(marked_image, tuple(pt), 3, (0, 0, 255), -1)
+
+
+    for i in range(min(len(points_src), len(points_dst))):
+        cv2.arrowedLine(marked_image, tuple(points_src[i]), tuple(points_dst[i]), (0, 255, 0), 2)
+
+    return marked_image
+
+
+def point_guided_deformation(image, source_pts, target_pts, alpha=1.0, eps=1e-8):
+
+    warped_image = np.array(image)
+    h, w_img = warped_image.shape[:2]
+    
+
+    min_len = min(len(source_pts), len(target_pts))
+    if min_len < 3:
+        print("Please provide at least 3 pairs of points.")
+        return warped_image
+        
+
+    p = np.array(target_pts[:min_len], dtype=np.float32)
+    q = np.array(source_pts[:min_len], dtype=np.float32)
+    
+    grid_X, grid_Y = np.meshgrid(np.arange(w_img), np.arange(h))
+    V = np.column_stack((grid_X.ravel(), grid_Y.ravel()))
+    
+
+    diff = V[:, np.newaxis, :] - p[np.newaxis, :, :]
+    dist_sq = np.sum(diff**2, axis=-1)
+    W = 1.0 / (dist_sq**alpha + eps)
+    W_sum = np.sum(W, axis=1, keepdims=True)
+    
+
+    p_star = np.sum(W[:, :, np.newaxis] * p[np.newaxis, :, :], axis=1) / W_sum
+    q_star = np.sum(W[:, :, np.newaxis] * q[np.newaxis, :, :], axis=1) / W_sum
+    
+
+    p_hat = p[np.newaxis, :, :] - p_star[:, np.newaxis, :]
+    q_hat = q[np.newaxis, :, :] - q_star[:, np.newaxis, :]
+    
+
+    w_p_hat = W[:, :, np.newaxis] * p_hat
+    A = np.matmul(np.transpose(w_p_hat, (0, 2, 1)), p_hat)
+    B = np.matmul(np.transpose(w_p_hat, (0, 2, 1)), q_hat)
+    
+    det = A[:, 0, 0] * A[:, 1, 1] - A[:, 0, 1] * A[:, 1, 0]
+    det[np.abs(det) < eps] = eps
+    
+    A_inv = np.empty_like(A)
+    A_inv[:, 0, 0] = A[:, 1, 1] / det
+    A_inv[:, 1, 1] = A[:, 0, 0] / det
+    A_inv[:, 0, 1] = -A[:, 0, 1] / det
+    A_inv[:, 1, 0] = -A[:, 1, 0] / det
+    
+
+    M = np.matmul(A_inv, B)
+    V_minus_p_star = (V - p_star)[:, np.newaxis, :]
+    mapped_V = np.matmul(V_minus_p_star, M)[:, 0, :] + q_star
+    
+    map_x = mapped_V[:, 0].reshape((h, w_img)).astype(np.float32)
+    map_y = mapped_V[:, 1].reshape((h, w_img)).astype(np.float32)
+    
+    warped_image = cv2.remap(image, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+    
+    return warped_image
+
+def run_warping():
+    global points_src, points_dst, image
+    if image is None:
+        return None
+    warped_image = point_guided_deformation(image, points_src, points_dst)
+    return warped_image
+
+
+def clear_points():
+    global points_src, points_dst, image
+    points_src.clear()
+    points_dst.clear()
+    return image
+
+
+with gr.Blocks() as demo:
+    gr.Markdown("## Interactive Image Deformation via Moving Least Squares (MLS)")
+    with gr.Row():
+        with gr.Column():
+            input_image = gr.Image(label="Upload Image", interactive=True, width=800)
+            point_select = gr.Image(label="Click to Select Source and Target Points", interactive=True, width=800)
+
+        with gr.Column():
+            result_image = gr.Image(label="Warped Result", width=800)
+
+    run_button = gr.Button("Run Warping")
+    clear_button = gr.Button("Clear Points")
+
+    input_image.upload(upload_image, input_image, point_select)
+    point_select.select(record_points, None, point_select)
+    run_button.click(run_warping, None, result_image)
+    clear_button.click(clear_points, None, point_select)
+
+demo.launch()
